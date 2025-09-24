@@ -21,13 +21,17 @@ library(corrplot)
 library(ggrepel)
 library(glue)
 library(flextable)
+library(rio)
 ```
 
 # Imprtacion de datos
 
 ```{r}
 datos <- read_excel("C:/Users/faile/OneDrive_UNAL/Escritorio/Superficie Respuesta Kelly/datos.xlsx",sheet = "datos")
-
+datos
+url ="https://raw.githubusercontent.com/jcastillab/Superficie-de-Respuesta/main/datos.xlsx"
+datos = import(url,which = "datos")
+datos
 ```
 
 # Recodificacion de factores para superficie de respuesta
