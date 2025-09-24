@@ -1,0 +1,604 @@
+---
+title: "Superficie de respuesta"
+output: html_document
+date: "2025-08-25"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Cargue de librerias
+
+```{r}
+library(tidyverse)
+library(car)
+library(rsm)
+library(readxl)
+library(rgl)
+library(RColorBrewer)
+library(corrplot)
+library(ggrepel)
+library(glue)
+library(flextable)
+```
+
+# Imprtacion de datos
+
+```{r}
+datos <- read_excel("C:/Users/faile/OneDrive_UNAL/Escritorio/Superficie Respuesta Kelly/datos.xlsx",sheet = "datos")
+
+```
+
+# Recodificacion de factores para superficie de respuesta
+
+```{r}
+df <- datos %>%
+  mutate(
+    Temperatura = dplyr::recode(as.character(Temperatura),
+                "190" = -1,
+                "210" = 0,
+                "230" = 1),
+    Tiempo = dplyr::recode(as.character(Tiempo),
+                "0.5" = -1,
+                "1"   = 0,
+                "2"   = 1)
+  ) %>% select(Temperatura, Tiempo, Rendimiento)
+```
+
+# Modelo cuadratico
+
+```{r}
+m <- lm(Rendimiento ~ Temperatura + Tiempo + I(Temperatura^2) + I(Tiempo^2) + Temperatura:Tiempo, data=df)
+```
+
+# Tabla de coeficientes
+
+```{r}
+coef_table <- summary(m)$coefficients %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("Termino") %>%
+  rename(
+    Estimado = Estimate,
+    `Error Std.` = `Std. Error`,
+    `t value` = `t value`,
+    `p-valor` = `Pr(>|t|)`
+  ) %>%
+  mutate(
+    `p-valor` = round(`p-valor`, 4),   # 👈 redondear a 4 decimales
+    Estimado = round(Estimado, 3),     # opcional: redondear estimados
+    `Error Std.` = round(`Error Std.`, 3),
+    `t value` = round(`t value`, 3),
+    Signif = case_when(
+      `p-valor` < 0.001 ~ "***",
+      `p-valor` < 0.01 ~ "**",
+      `p-valor` < 0.05 ~ "*",
+      `p-valor` < 0.1 ~ ".",
+      TRUE ~ ""
+    )
+  )
+
+ft_coef <- flextable(coef_table) %>%
+  autofit() %>%
+  set_caption("Tabla 1. Coeficientes del modelo cuadrático para el rendimiento de biochar")
+
+ft_coef
+```
+
+# Tabla ANOVA
+
+```{r}
+anova_table <- Anova(m, type="III") %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("Termino") %>%
+  rename(
+    `Suma Cuadrados` = `Sum Sq`,
+    gl = Df,
+    `Valor F` = `F value`,
+    `p-valor` = `Pr(>F)`
+  ) %>%
+  mutate(
+    `p-valor` = round(`p-valor`, 4), 
+    Signif = case_when(
+      `p-valor` < 0.001 ~ "***",
+      `p-valor` < 0.01 ~ "**",
+      `p-valor` < 0.05 ~ "*",
+      `p-valor` < 0.1 ~ ".",
+      TRUE ~ ""
+    )
+  )
+
+ft_anova <- flextable(anova_table) %>%
+  autofit() %>%
+  set_caption("Tabla 2. ANOVA (Type III) del modelo cuadrático")
+
+ft_anova
+
+```
+
+# Superficie de respuesta
+
+```{r}
+# Superficie de respuesta
+m_rsm <- rsm(Rendimiento ~ SO(Temperatura,Tiempo), data=df)
+canonical(m_rsm)
+# Calcular el punto estacionario
+st_point <- canonical(m_rsm)$xs  
+
+# Graficar contorno y agregar el punto
+contour(m_rsm, ~ Temperatura+Tiempo, image=TRUE)
+points(st_point[1], st_point[2], col="red", pch=19, cex=1.5) # punto rojo
+text(st_point[1], st_point[2], labels="Mínimo", pos=4, col="red")
+```
+
+# Punto estacionario (en valores reales)
+
+```{r}
+# 1) Punto estacionario en unidades codificadas
+st <- canonical(m_rsm)$xs  # vector c(Temperatura_cod, Tiempo_cod)
+
+# 2) Calcula centro y Δ a partir de tus datos reales
+T_low  <- min(datos$Temperatura)
+T_high <- max(datos$Temperatura)
+t_low  <- min(datos$Tiempo)
+t_high <- max(datos$Tiempo)
+
+T_ctr <- (T_high + T_low)/2        # centro de Temperaturaeratura
+T_del <- (T_high - T_low)/2        # Δ (half-range) de Temperaturaeratura
+t_ctr <- (t_high + t_low)/2        # centro de Tiempoo
+t_del <- (t_high - t_low)/2        # Δ de Tiempoo
+
+# 3) Pasa de codificado → real
+T_real <- st[1] * T_del + T_ctr
+t_real <- st[2] * t_del + t_ctr
+
+c(Temperatura = T_real, Tiempo = t_real)
+```
+```{r}
+pred_min <- predict(m_rsm,
+  newdata = data.frame(Temperatura = st[1], Tiempo = st[2]))
+print(paste("El rendimiento en el punto minimo es", round(pred_min,2), "%"))
+```
+
+# Visualizacion en 3d del modelo
+```{r}
+library(rgl)
+library(RColorBrewer)
+
+# Crear grilla de valores
+grid <- expand.grid(
+  Temperatura = seq(min(df$Temperatura), max(df$Temperatura), length=40),
+  Tiempo = seq(min(df$Tiempo), max(df$Tiempo), length=40)
+)
+grid$z <- predict(m_rsm, newdata=grid)
+
+# Convertir a matriz
+zmat <- matrix(grid$z, 40, 40)
+
+# Crear vector de colores según z
+ncols <- 100
+pal <- colorRampPalette(c("blue", "green", "yellow", "red"))(ncols)
+z_scaled <- round( (zmat - min(zmat)) / (max(zmat) - min(zmat)) * (ncols-1) ) + 1
+zmat_col <- matrix(pal[z_scaled], 40, 40)
+
+# Graficar superficie 3D con colores según respuesta
+persp3d(
+  x = seq(min(df$Temperatura), max(df$Temperatura), length=40),
+  y = seq(min(df$Tiempo), max(df$Tiempo), length=40),
+  z = zmat,
+  color = zmat_col,
+  alpha = 0.8,
+  xlab = "Temperaturaeratura",
+  ylab = "Tiempoo",
+  zlab = "Respuesta"
+)
+
+# Agregar puntos mínimo y máximo como antes
+z_min <- predict(m_rsm, newdata=as.data.frame(t(st_point)))
+points3d(st_point[1], st_point[2], z_min, col="red", size=10)
+text3d(st_point[1], st_point[2], z_min,
+       texts=paste0("Min: (Temperatura=", round(st_point[1],2), 
+                    ", Tiempoo=", round(st_point[2],2), 
+                    ", Resp=", round(z_min,2), ")"),
+       adj=c(0,1), col="black")
+
+max_idx <- which.max(grid$z)
+max_point <- grid[max_idx, ]
+points3d(max_point$Temperatura, max_point$Tiempo, max_point$z, col="blue", size=10)
+text3d(max_point$Temperatura, max_point$Tiempo, max_point$z,
+       texts=paste0("Max: (Temperatura=", round(max_point$Temperatura,2), 
+                    ", Tiempoo=", round(max_point$Tiempo,2), 
+                    ", Resp=", round(max_point$z,2), ")"),
+       adj=c(1,0), col="blue")
+
+library(rgl)
+
+# Coordenadas de la grilla
+x_seq <- seq(min(df$Temperatura), max(df$Temperatura), length=40)
+y_seq <- seq(min(df$Tiempo), max(df$Tiempo), length=40)
+
+# Líneas a lo largo del eje X
+for(i in 1:length(y_seq)) {
+  lines3d(x = x_seq,
+          y = rep(y_seq[i], length(x_seq)),
+          z = zmat[, i], 
+          col = "black", alpha = 0.3)
+}
+
+# Líneas a lo largo del eje Y
+for(i in 1:length(x_seq)) {
+  lines3d(x = rep(x_seq[i], length(y_seq)),
+          y = y_seq,
+          z = zmat[i, ], 
+          col = "black", alpha = 0.3)
+}
+
+```
+
+# ANOVA del modelo de superficie de respuesta
+
+```{r}
+anova(m_rsm)
+```
+
+# Parámetros estimados y la bondad del ajuste del modelo cuadrático.
+```{r}
+summary(m_rsm)
+```
+
+## variables Auxiliares
+
+```{r}
+solida <- read_excel("datos.xlsx", sheet = "solida")
+liquida <- read_excel("datos.xlsx", sheet = "liquida")
+```
+
+# Funcion base para graficar, sin umbrales
+
+```{r}
+plot_scatter_trat <- function(database, var,
+                              per_T_slopes = TRUE,   # líneas por Temperaturaeratura
+                              show_rho_by_T = TRUE   # rho por Temperaturaeratura en caption
+){
+  library(dplyr); library(ggplot2); library(ggrepel); library(glue); library(rlang)
+
+  # Preparar datos (asegura factores)
+  db <- database %>%
+    rename(T = `T [°C]`, t = `t [h]`, Y = `Rendimiento [%]`) %>%
+    mutate(T = factor(T), t = factor(t))
+
+  # Cálculo de rho global y por T (Spearman)
+  rho_global <- suppressWarnings(cor(db$Y, db[[var]], method = "spearman"))
+  rho_T <- db %>%
+    group_by(T) %>%
+    summarise(rho = suppressWarnings(cor(Y, .data[[var]], method = "spearman")),
+              .groups = "drop")
+
+  # Base: puntos + etiquetas
+  p <- ggplot(db, aes(x = .data[[var]], y = Y, color = T, shape = t)) +
+    geom_point(size = 3) +
+    ggrepel::geom_text_repel(aes(label = Tratamiento), show.legend = FALSE) +
+    labs(x = var, y = "Rendimiento [%]",
+         color = "Temperaturaeratura", shape = "Tiempoo",
+         subtitle = glue("Spearman ρ (global) = {round(rho_global, 2)}")) +
+    theme_minimal()
+
+  # Recta global (punteada). Importante: usar inherit.aes = FALSE para no perder shape
+  p <- p + geom_smooth(
+    data = db,
+    aes(x = .data[[var]], y = Y),
+    method = "lm", se = FALSE,
+    linetype = "dashed", linewidth = 0.7, color = "grey30",
+    inherit.aes = FALSE
+  )
+
+  # Rectas por Temperaturaeratura (finas) si se pide
+  if (per_T_slopes) {
+    p <- p + geom_smooth(
+      aes(group = T),         # << agrupa por T; no usa 'shape' (evita el warning)
+      method = "lm", se = FALSE,
+      linewidth = 0.6
+    )
+  }
+
+  # Caption con ρ por T si se pide
+  if (show_rho_by_T) {
+    cap <- paste0(
+      "ρ por T: ",
+      paste0(levels(db$T),
+             "=",
+             sprintf("%.2f", rho_T$rho[match(levels(db$T), rho_T$T)]),
+             collapse = "   ")
+    )
+    p <- p + labs(caption = cap)
+  }
+
+  p
+}
+
+```
+
+# Scatterplot variables fase solida
+
+```{r warning=FALSE}
+plot_scatter_trat(solida,"CE [dS/m]")
+plot_scatter_trat(solida,"pH post-lavado")
+plot_scatter_trat(solida,"CIC [meq/100g]")
+plot_scatter_trat(solida,"Ca [%]")
+plot_scatter_trat(solida,"Mg [%]")
+plot_scatter_trat(solida,"K [%]")
+plot_scatter_trat(solida,"C/N")
+```
+
+# Scatterplot variables fase liquida
+
+```{r}
+plot_scatter_trat(liquida,"Furfural [mg/L]")
+plot_scatter_trat(liquida,"Glucosa [mg/L]")
+plot_scatter_trat(liquida,"Xilosa [mg/L]")
+```
+
+## Funcion para plotear variable contra rendimiento, asignando umbrales para seleccion
+```{r}
+plot_scatter_trat_2 <- function(
+  database, var,
+  x_thresh = NULL,            # umbral en X (p.ej. Furfural <= 1)
+  x_side = c("left","right"), # lado factible respecto a x_thresh
+  y_thresh = NULL,            # umbral/meta en Y (p.ej. Rend >= 60)
+  y_side = c("above","below"),
+  shade_feasible = TRUE,
+  per_T_slopes = TRUE,        # líneas LM por Temperaturaeratura
+  show_rho_by_T = TRUE,       # muestra ρ por Temperaturaeratura
+  logx = FALSE                # log10 en X (útil para inhibidores)
+){
+  x_side <- match.arg(x_side)
+  y_side <- match.arg(y_side)
+
+  library(dplyr); library(ggplot2); library(ggrepel); library(glue); library(rlang)
+
+  db <- database %>%
+    rename(T = `T [°C]`, t = `t [h]`, Y = `Rendimiento [%]`)
+
+  # rho global y por Temperaturaeratura
+  rho_global <- suppressWarnings(cor(db$Y, db[[var]], method = "spearman"))
+  rho_T <- db %>%
+    group_by(T) %>%
+    summarise(rho = suppressWarnings(cor(Y, .data[[var]], method = "spearman")),
+              .groups = "drop")
+
+  p <- ggplot(db, aes(x = .data[[var]], y = Y, color = factor(T), shape = factor(t))) +
+    geom_point(size = 3) +
+    ggrepel::geom_text_repel(aes(label = Tratamiento), show.legend = FALSE) +
+    labs(
+      x = var, y = "Rendimiento [%]",
+      color = "Temperaturaeratura", shape = "Tiempoo",
+      subtitle = glue("Spearman ρ (global) = {round(rho_global, 2)}")
+    ) +
+    theme_minimal()
+
+  # Líneas LM: global y por T
+  p <- p + geom_smooth(method = "lm", se = FALSE, linetype = "dashed", alpha = .6, inherit.aes = TRUE)
+  if (per_T_slopes) {
+    p <- p + geom_smooth(aes(group = factor(T)), method = "lm", se = FALSE, linewidth = 0.5)
+  }
+
+  # Líneas de umbral
+  if (!is.null(x_thresh)) p <- p + geom_vline(xintercept = x_thresh, linetype = 3)
+  if (!is.null(y_thresh)) p <- p + geom_hline(yintercept = y_thresh, linetype = 3)
+
+  # Región factible sombreada
+  if (shade_feasible && (!is.null(x_thresh) || !is.null(y_thresh))) {
+    # rangos
+    xr <- range(db[[var]], na.rm = TRUE); yr <- range(db$Y, na.rm = TRUE)
+    xmin <- if (is.null(x_thresh) || x_side == "right") xr[1] else xr[1]
+    xmax <- if (is.null(x_thresh)) xr[2] else if (x_side == "left") x_thresh else xr[2]
+    ymin <- if (is.null(y_thresh)) yr[1] else if (y_side == "above") y_thresh else yr[1]
+    ymax <- if (is.null(y_thresh) || y_side == "below") yr[2] else yr[2]
+    # Ajustes según combinaciones de lados
+    if (!is.null(x_thresh) && x_side == "right") xmin <- x_thresh
+    if (!is.null(y_thresh) && y_side == "below") ymax <- y_thresh
+
+    p <- p + annotate("rect",
+                      xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax,
+                      alpha = 0.10, fill = "grey50")
+  }
+
+  # Rho por T (pequeño cuadro)
+  if (show_rho_by_T) {
+    lab <- paste0("ρ por T: ",
+                  paste0(unique(rho_T$T), "=", sprintf("%.2f", rho_T$rho), collapse = "  "))
+    p <- p + labs(caption = lab)
+  }
+
+  if (logx) p <- p + scale_x_log10()
+  p
+}
+
+```
+
+# Plot variable con umbrales
+
+```{r warning=FALSE}
+plot_scatter_trat_2(liquida, "Furfural [mg/L]",
+                  x_thresh = 1.0, x_side = "right",    # <= 1 mg/L
+                  y_thresh = 60,  y_side = "above",   # Rend >= 60 (si te sirve)
+                  shade_feasible = TRUE, logx = TRUE)
+
+```
+
+# Mapa de calor correlacion de spearman para vairables fase solida
+```{r}
+
+solida2 <- solida |>
+  rename(T = `T [°C]`,
+         t = `t [h]`,
+         Y = `Rendimiento [%]`)
+
+
+vars_solid <- c("CE [dS/m]", "pH post-lavado", "Ca [%]", "Mg [%]", "K [%]", "C/N")
+
+
+# Spearman POR TemperaturaERATURA
+rho_byT <- solida2 |>
+  group_by(T) |>
+  summarise(across(all_of(vars_solid),
+                   ~ suppressWarnings(cor(Y, .x, method = "spearman",
+                                          use = "pairwise.complete.obs")),
+                   .names = "{.col}"),
+            .groups = "drop") |>
+  pivot_longer(-T, names_to = "variable", values_to = "rho")
+
+
+#Heatmap por Temperaturaeratura
+ggplot(rho_byT, aes(x = factor(T), y = variable, fill = rho)) +
+  geom_tile(color="black") +
+  geom_text(aes(label = sprintf("%.2f", rho))) +
+  scale_fill_gradient2(limits = c(-1, 1), midpoint = 0) +
+  labs(x = "Temperaturaeratura (°C)", y = NULL, fill = "ρ Spearman",
+       title = "Correlación de Spearman por Temperaturaeratura \n(Rendimiento vs. variables en fase solida)") +
+  theme_minimal()
+```
+
+# Mapa de calor correlacion de spearman para vairables fase solida
+
+```{r}
+
+liquida2 <- liquida |>
+  rename(T = `T [°C]`,
+         t = `t [h]`,
+         Y = `Rendimiento [%]`)
+
+
+vars_liquida <- c("Furfural [mg/L]", "Glucosa [mg/L]", "Xilosa [mg/L]")
+
+
+# Spearman POR TemperaturaERATURA
+rho_byT <- liquida2 |>
+  group_by(T) |>
+  summarise(across(all_of(vars_liquida),
+                   ~ suppressWarnings(cor(Y, .x, method = "spearman",
+                                          use = "pairwise.complete.obs")),
+                   .names = "{.col}"),
+            .groups = "drop") |>
+  pivot_longer(-T, names_to = "variable", values_to = "rho")
+
+#Heatmap por Temperaturaeratura
+ggplot(rho_byT, aes(x = factor(T), y = variable, fill = rho)) +
+  geom_tile(color="black") +
+  geom_text(aes(label = sprintf("%.2f", rho))) +
+  scale_fill_gradient2(limits = c(-1, 1), midpoint = 0) +
+  labs(x = "Temperaturaeratura (°C)", y = NULL, fill = "ρ Spearman",
+       title = "Correlación de Spearman por Temperaturaeratura \n(Rendimiento vs. variables en fase liquida)") +
+  theme_minimal()
+```
+
+
+# Gif modelo 3d
+```{r}
+# ============================================
+# GIF superficie 3D (rgl + gifski) - versión final
+# ============================================
+
+pkgs <- c("rgl","gifski","png","rsm")
+to_install <- setdiff(pkgs, rownames(installed.packages()))
+if(length(to_install)) install.packages(to_install)
+invisible(lapply(pkgs, library, character.only = TRUE))
+
+# Crear grilla de valores
+grid <- expand.grid(
+  Temperatura = seq(min(df$Temperatura), max(df$Temperatura), length=40),
+  Tiempo = seq(min(df$Tiempo), max(df$Tiempo), length=40)
+)
+grid$z <- predict(m_rsm, newdata=grid)
+
+# Convertir a matriz
+zmat <- matrix(grid$z, 40, 40)
+
+# Crear vector de colores según z
+ncols <- 100
+pal <- colorRampPalette(c("blue", "green", "yellow", "red"))(ncols)
+z_scaled <- round( (zmat - min(zmat)) / (max(zmat) - min(zmat)) * (ncols-1) ) + 1
+zmat_col <- matrix(pal[z_scaled], 40, 40)
+
+# Graficar superficie 3D con colores según respuesta
+open3d(windowRect = c(100, 100, 2020, 1180)) 
+persp3d(
+  x = seq(min(df$Temperatura), max(df$Temperatura), length=40),
+  y = seq(min(df$Tiempo), max(df$Tiempo), length=40),
+  z = zmat,
+  color = zmat_col,
+  alpha = 0.8,
+  xlab = "Temperatura",
+  ylab = "Tiempo",
+  zlab = "Respuesta"
+)
+
+# Agregar puntos mínimo y máximo como antes
+z_min <- predict(m_rsm, newdata=as.data.frame(t(st_point)))
+points3d(st_point[1], st_point[2], z_min, col="red", size=10)
+text3d(st_point[1], st_point[2], z_min,
+       texts=paste0("Min: (Temperatura=", round(st_point[1],2), 
+                    ", Tiempo=", round(st_point[2],2), 
+                    ", Resp=", round(z_min,2), ")"),
+       adj=c(0,1), col="black")
+
+max_idx <- which.max(grid$z)
+max_point <- grid[max_idx, ]
+points3d(max_point$Temperatura, max_point$Tiempo, max_point$z, col="blue", size=10)
+text3d(max_point$Temperatura, max_point$Tiempo, max_point$z,
+       texts=paste0("Max: (Temperatura=", round(max_point$Temperatura,2), 
+                    ", Tiempo=", round(max_point$Tiempo,2), 
+                    ", Resp=", round(max_point$z,2), ")"),
+       adj=c(1,0), col="blue")
+
+library(rgl)
+
+# Coordenadas de la grilla
+x_seq <- seq(min(df$Temperatura), max(df$Temperatura), length=40)
+y_seq <- seq(min(df$Tiempo), max(df$Tiempo), length=40)
+
+# Líneas a lo largo del eje X
+for(i in 1:length(y_seq)) {
+  lines3d(x = x_seq,
+          y = rep(y_seq[i], length(x_seq)),
+          z = zmat[, i], 
+          col = "black", alpha = 0.3)
+}
+
+# Líneas a lo largo del eje Y
+for(i in 1:length(x_seq)) {
+  lines3d(x = rep(x_seq[i], length(y_seq)),
+          y = y_seq,
+          z = zmat[i, ], 
+          col = "black", alpha = 0.3)
+}
+
+# --- 4) Fijar orientación y ejes (para que no “gire raro”) ---
+
+aspect3d(1, 1, 0.7)
+base <- par3d("userMatrix")
+
+
+# --- 5) GIF: rota SOLO theta, mantiene phi/zoom/fov constantes ---
+if(!dir.exists("outputs")) dir.create("outputs", recursive = TRUE)
+
+nframes  <- 300
+pngs     <- sprintf("frame_%03d.png", 1:nframes)
+
+# vista base (phi/zoom/fov fijos)
+view3d(theta = 0, phi = 30, zoom = 0.85, fov = 0)
+
+for(i in 1:nframes){
+  ang <- 2*pi*i/nframes
+  M   <- base %*% rotationMatrix(ang, 0, 0, 1)  # gira sobre z (Respuesta)
+  par3d(userMatrix = M)
+  rgl.snapshot(pngs[i])
+}
+
+gifski(pngs, gif_file = "outputs/superficie_3d.gif", delay = 1/90,width = 1920,height = 1080,loop = T)
+file.remove(pngs)
+
+
+
+```
+
